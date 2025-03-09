@@ -1,0 +1,399 @@
+bl_info = {
+    "name": "Toggle Mute Bump and Normal Nodes",
+    "blender": (3, 0, 0),
+    "category": "Node",
+    "version": (0, 9),
+    "author": "spettsart",
+    "description": "Mute, unmute, or toggle bump and normal nodes",
+    "location": "View3D > Slidebar > Tool > Mute Bump and Normals",
+    "location": "Node Editor > Slidebar > Tool > Mute Bump and Normals",
+}
+
+
+# Muting needs to remember only the manually muted nodes so that leaving muted from a button will not lock it
+#fix the keymap to work with the new keymap system and not conflict with ctrl/alt feature
+
+
+import bpy
+from bpy.props import StringProperty
+
+class NODE_TOOLS_PT_preferences(bpy.types.AddonPreferences):
+    bl_idname = __name__
+
+    def draw(self, context):
+        layout = self.layout
+
+        layout.label(text="Description") 
+        layout.scale_y = 0.5
+        col = layout.column(align=True)
+        col.scale_y = 1.2
+        col.label(text="This addon provides tools to mute, unmute, or toggle bump and normal nodes in materials.")
+        col.label(text="Use Ctrl+Click for only Normal Map nodes and Alt+Click for only Bump nodes.")
+        
+        layout.separator()
+        layout.label(text="Panel Location") 
+        layout.scale_y = 0.5
+        col = layout.column(align=True)
+        col.scale_y = 1.2
+        col.label(text="3D View > Slidebar > Tool > Mute Bump and Normals")
+        col.label(text="Node Editor > Slidebar > Tool > Mute Bump and Normals")
+
+
+# Dictionary to store the original mute states (for toggle functionality)
+original_mute_states = {}
+
+# Store keymaps here to access after registration
+addon_keymaps = []
+
+# Function to get materials from selected objects
+def get_materials_from_selected_objects():
+    materials = set()
+    for obj in bpy.context.selected_objects:
+        if obj.type in {'MESH', 'CURVE', 'SURFACE', 'META', 'FONT'}:
+            for slot in obj.material_slots:
+                if slot.material:
+                    materials.add(slot.material)
+    return materials
+
+# Function to get all materials in the scene
+def get_all_materials():
+    return set(bpy.data.materials)
+
+# Base operator class with modifier support
+class BaseNodeOperator(bpy.types.Operator):
+    node_type: bpy.props.StringProperty(default="")  # "BUMP", "NORMAL_MAP", or "" for both
+
+    def execute(self, context):
+        # Determine which node types to process based on modifiers
+        node_types = []
+        if self.node_type:
+            node_types.append(self.node_type)
+        else:
+            if self.is_ctrl:
+                node_types.append("NORMAL_MAP")
+            elif self.is_alt:
+                node_types.append("BUMP")
+            else:
+                node_types.extend(["BUMP", "NORMAL_MAP"])
+
+        # Process the nodes
+        materials = self.get_materials(context)
+        for material in materials:
+            if material.use_nodes:
+                for node in material.node_tree.nodes:
+                    if node.type in node_types:
+                        self.process_node(node)
+        return {'FINISHED'}
+
+    def get_materials(self, context):
+        # Override in subclasses to return materials for selected or all objects
+        raise NotImplementedError
+
+    def process_node(self, node):
+        # Override in subclasses to mute, unmute, or toggle nodes
+        raise NotImplementedError
+
+    def invoke(self, context, event):
+        # Check for Ctrl or Alt modifiers
+        self.is_ctrl = event.ctrl
+        self.is_alt = event.alt
+        return self.execute(context)
+
+# Operator to Mute Bump and Normal Nodes (Selected Objects)
+class MUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator(BaseNodeOperator):
+    """Mute all bump and normal nodes in materials of selected objects"""
+    bl_idname = "node.mute_bump_normal_nodes_selected"
+    bl_label = "Mute Bump and Normal Nodes (Selected)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def get_materials(self, context):
+        return get_materials_from_selected_objects()
+
+    def process_node(self, node):
+        node.mute = True
+
+# Operator to Unmute Bump and Normal Nodes (Selected Objects)
+class UNMUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator(BaseNodeOperator):
+    """Unmute all bump and normal nodes in materials of selected objects"""
+    bl_idname = "node.unmute_bump_normal_nodes_selected"
+    bl_label = "Unmute Bump and Normal Nodes (Selected)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def get_materials(self, context):
+        return get_materials_from_selected_objects()
+
+    def process_node(self, node):
+        node.mute = False
+
+# Operator to Toggle Bump and Normal Nodes (Selected Objects)
+class TOGGLE_BUMP_NORMAL_NODES_SELECTED_OT_operator(bpy.types.Operator):
+    """Toggle mute state of bump and normal nodes in materials of selected objects"""
+    bl_idname = "node.toggle_bump_normal_nodes_selected"
+    bl_label = "Toggle Bump and Normal Nodes (Selected)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        global original_mute_states
+
+        materials = get_materials_from_selected_objects()
+        if not original_mute_states:
+            # Store the current mute states and mute all nodes
+            original_mute_states.clear()  # Clear any previous states
+            for material in materials:
+                if material.use_nodes:
+                    for node in material.node_tree.nodes:
+                        if node.type in ('BUMP', 'NORMAL_MAP'):
+                            original_mute_states[node] = node.mute
+                            node.mute = True
+        else:
+            # Restore the original mute states for nodes that were not manually muted
+            for material in materials:
+                if material.use_nodes:
+                    for node in material.node_tree.nodes:
+                        if node.type in ('BUMP', 'NORMAL_MAP') and node in original_mute_states:
+                            if not original_mute_states[node]:  # Only restore if originally unmuted
+                                node.mute = False
+            # Clear the dictionary after restoring
+            original_mute_states.clear()
+
+        return {'FINISHED'}
+
+# Operator to Mute Bump and Normal Nodes (All Objects)
+class MUTE_BUMP_NORMAL_NODES_ALL_OT_operator(BaseNodeOperator):
+    """Mute all bump and normal nodes in all materials"""
+    bl_idname = "node.mute_bump_normal_nodes_all"
+    bl_label = "Mute Bump and Normal Nodes (All)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def get_materials(self, context):
+        return get_all_materials()
+
+    def process_node(self, node):
+        node.mute = True
+
+# Operator to Unmute Bump and Normal Nodes (All Objects)
+class UNMUTE_BUMP_NORMAL_NODES_ALL_OT_operator(BaseNodeOperator):
+    """Unmute all bump and normal nodes in all materials"""
+    bl_idname = "node.unmute_bump_normal_nodes_all"
+    bl_label = "Unmute Bump and Normal Nodes (All)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def get_materials(self, context):
+        return get_all_materials()
+
+    def process_node(self, node):
+        node.mute = False
+
+# Operator to Toggle Bump and Normal Nodes (All Objects)
+class TOGGLE_BUMP_NORMAL_NODES_ALL_OT_operator(bpy.types.Operator):
+    """Toggle mute state of bump and normal nodes in all materials"""
+    bl_idname = "node.toggle_bump_normal_nodes_all"
+    bl_label = "Toggle Bump and Normal Nodes (All)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        global original_mute_states
+
+        materials = get_all_materials()
+        if not original_mute_states:
+            # Store the current mute states and mute all nodes
+            original_mute_states.clear()  # Clear any previous states
+            for material in materials:
+                if material.use_nodes:
+                    for node in material.node_tree.nodes:
+                        if node.type in ('BUMP', 'NORMAL_MAP'):
+                            original_mute_states[node] = node.mute
+                            node.mute = True
+        else:
+            # Restore the original mute states for nodes that were not manually muted
+            for material in materials:
+                if material.use_nodes:
+                    for node in material.node_tree.nodes:
+                        if node.type in ('BUMP', 'NORMAL_MAP') and node in original_mute_states:
+                            if not original_mute_states[node]:  # Only restore if originally unmuted
+                                node.mute = False
+            # Clear the dictionary after restoring
+            original_mute_states.clear()
+
+        return {'FINISHED'}
+
+
+
+# UI elements called on each tab in editor and 3d view
+def draw_panel_content(layout):
+    # Selected Objects Group
+    box = layout.box()
+    box.label(text="Selected Objects")
+    op = box.operator("node.mute_bump_normal_nodes_selected", text="Mute Selected", icon='HIDE_ON')
+    op = box.operator("node.unmute_bump_normal_nodes_selected", text="Unmute Selected", icon='HIDE_OFF')
+    op = box.operator("node.toggle_bump_normal_nodes_selected", text="Toggle Selected", icon='FILE_REFRESH')
+
+    # All Objects Group
+    box = layout.box()
+    box.label(text="All Objects")
+    op = box.operator("node.mute_bump_normal_nodes_all", text="Mute All", icon='HIDE_ON')
+    op = box.operator("node.unmute_bump_normal_nodes_all", text="Unmute All", icon='HIDE_OFF')
+    op = box.operator("node.toggle_bump_normal_nodes_all", text="Toggle All", icon='FILE_REFRESH')
+
+
+    layout.separator()
+    col = box.column()
+    col = layout.column(align=True)
+    col.scale_y = 0.7
+    col.label(text="Ctrl+Click: Mute/Unmute Normal Map nodes only")
+    col.label(text="Alt+Click: Mute/Unmute Bump nodes only")
+
+
+# Panel for Node Editor
+class NODE_PT_custom_panel_node(bpy.types.Panel):
+    bl_label = "Mute Bump and Normals"
+    bl_idname = "NODE_PT_custom_panel_node"
+    bl_space_type = 'NODE_EDITOR'
+    bl_region_type = 'UI'
+    bl_category = "Tool"
+
+    def draw(self, context):
+        draw_panel_content(self.layout)
+
+# Panel for 3D View
+class NODE_PT_custom_panel_3d(bpy.types.Panel):
+    bl_label = "Mute Bump and Normals"
+    bl_idname = "NODE_PT_custom_panel_3d"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Tool"
+
+    def draw(self, context):
+        draw_panel_content(self.layout)
+
+
+# Register and Unregister Functions
+def register():
+    bpy.utils.register_class(NODE_TOOLS_PT_preferences)
+    bpy.utils.register_class(MUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator)
+    bpy.utils.register_class(UNMUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator)
+    bpy.utils.register_class(TOGGLE_BUMP_NORMAL_NODES_SELECTED_OT_operator)
+    bpy.utils.register_class(MUTE_BUMP_NORMAL_NODES_ALL_OT_operator)
+    bpy.utils.register_class(UNMUTE_BUMP_NORMAL_NODES_ALL_OT_operator)
+    bpy.utils.register_class(TOGGLE_BUMP_NORMAL_NODES_ALL_OT_operator)
+    bpy.utils.register_class(NODE_PT_custom_panel_node)
+    bpy.utils.register_class(NODE_PT_custom_panel_3d)
+
+    # Handle keymaps
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if kc:
+        # Keymap for Node Editor
+        km_node = kc.keymaps.new(name='Node Editor', space_type='NODE_EDITOR')
+        kmi_mute_selected = km_node.keymap_items.new(
+            MUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator.bl_idname,
+            type='M',
+            value='PRESS',
+            alt=True,
+            shift=True,
+        )
+        kmi_unmute_selected = km_node.keymap_items.new(
+            UNMUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator.bl_idname,
+            type='U',
+            value='PRESS',
+            alt=True,
+            shift=True,
+        )
+        kmi_toggle_selected = km_node.keymap_items.new(
+            TOGGLE_BUMP_NORMAL_NODES_SELECTED_OT_operator.bl_idname,
+            type='R',
+            value='PRESS',
+            shift=True,
+        )
+        kmi_mute_all = km_node.keymap_items.new(
+            MUTE_BUMP_NORMAL_NODES_ALL_OT_operator.bl_idname,
+            type='M',
+            value='PRESS',
+            shift=True,
+        )
+        kmi_unmute_all = km_node.keymap_items.new(
+            UNMUTE_BUMP_NORMAL_NODES_ALL_OT_operator.bl_idname,
+            type='U',
+            value='PRESS',
+            shift=True,
+        )
+        kmi_toggle_all = km_node.keymap_items.new(
+            TOGGLE_BUMP_NORMAL_NODES_ALL_OT_operator.bl_idname,
+            type='E',
+            value='PRESS',
+            shift=True,
+        )
+
+        # Keymap for 3D View
+        km_3d = kc.keymaps.new(name='3D View', space_type='VIEW_3D')
+        kmi_mute_selected_3d = km_3d.keymap_items.new(
+            MUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator.bl_idname,
+            type='M',
+            value='PRESS',
+            alt=True,
+            shift=True,
+        )
+        kmi_unmute_selected_3d = km_3d.keymap_items.new(
+            UNMUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator.bl_idname,
+            type='U',
+            value='PRESS',
+            alt=True,
+            shift=True,
+        )
+        kmi_toggle_selected_3d = km_3d.keymap_items.new(
+            TOGGLE_BUMP_NORMAL_NODES_SELECTED_OT_operator.bl_idname,
+            type='R',
+            value='PRESS',
+            shift=True,
+        )
+        kmi_mute_all_3d = km_3d.keymap_items.new(
+            MUTE_BUMP_NORMAL_NODES_ALL_OT_operator.bl_idname,
+            type='M',
+            value='PRESS',
+            shift=True,
+        )
+        kmi_unmute_all_3d = km_3d.keymap_items.new(
+            UNMUTE_BUMP_NORMAL_NODES_ALL_OT_operator.bl_idname,
+            type='U',
+            value='PRESS',
+            shift=True,
+        )
+        kmi_toggle_all_3d = km_3d.keymap_items.new(
+            TOGGLE_BUMP_NORMAL_NODES_ALL_OT_operator.bl_idname,
+            type='E',
+            value='PRESS',
+            shift=True,
+        )
+
+        # Store keymaps for cleanup
+        addon_keymaps.append((km_node, kmi_mute_selected))
+        addon_keymaps.append((km_node, kmi_unmute_selected))
+        addon_keymaps.append((km_node, kmi_toggle_selected))
+        addon_keymaps.append((km_node, kmi_mute_all))
+        addon_keymaps.append((km_node, kmi_unmute_all))
+        addon_keymaps.append((km_node, kmi_toggle_all))
+        addon_keymaps.append((km_3d, kmi_mute_selected_3d))
+        addon_keymaps.append((km_3d, kmi_unmute_selected_3d))
+        addon_keymaps.append((km_3d, kmi_toggle_selected_3d))
+        addon_keymaps.append((km_3d, kmi_mute_all_3d))
+        addon_keymaps.append((km_3d, kmi_unmute_all_3d))
+        addon_keymaps.append((km_3d, kmi_toggle_all_3d))
+
+def unregister():
+    bpy.utils.unregister_class(NODE_TOOLS_PT_preferences)
+    bpy.utils.unregister_class(MUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator)
+    bpy.utils.unregister_class(UNMUTE_BUMP_NORMAL_NODES_SELECTED_OT_operator)
+    bpy.utils.unregister_class(TOGGLE_BUMP_NORMAL_NODES_SELECTED_OT_operator)
+    bpy.utils.unregister_class(MUTE_BUMP_NORMAL_NODES_ALL_OT_operator)
+    bpy.utils.unregister_class(UNMUTE_BUMP_NORMAL_NODES_ALL_OT_operator)
+    bpy.utils.unregister_class(TOGGLE_BUMP_NORMAL_NODES_ALL_OT_operator)
+    bpy.utils.unregister_class(NODE_PT_custom_panel_node)
+    bpy.utils.unregister_class(NODE_PT_custom_panel_3d)
+
+    # Handle keymaps cleanup
+    for km, kmi in addon_keymaps:
+        km.keymap_items.remove(kmi)
+    addon_keymaps.clear()
+
+if __name__ == "__main__":
+    register()
